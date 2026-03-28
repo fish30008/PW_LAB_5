@@ -213,6 +213,84 @@ def pretty_print_response(headers, body):
     else:
         print(body.decode())
 
+
+def _normalize_search_result_url(href):
+    if not href:
+        return None
+
+    # DuckDuckGo HTML results often use redirect links with uddg query param.
+    parsed_href = urllib.parse.urlparse(href)
+    if parsed_href.netloc.endswith('duckduckgo.com') and parsed_href.path.startswith('/l/'):
+        parsed_query = urllib.parse.parse_qs(parsed_href.query)
+        real_url = parsed_query.get('uddg', [None])[0]
+        if real_url:
+            return real_url
+
+    if href.startswith('/l/?uddg='):
+        parsed_query = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+        real_url = parsed_query.get('uddg', [None])[0]
+        if real_url:
+            return real_url
+
+    if href.startswith('//'):
+        return 'https:' + href
+
+    return href
+
+def search_and_select(term):
+    url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(term)}"
+    status, headers, body = request(url, headers={'Accept': 'text/html'})
+    if status != 200:
+        print("Search failed", file=sys.stderr)
+        return
+
+    soup = BeautifulSoup(body, 'html.parser')
+    results = []
+    for result in soup.find_all('div', class_='result'):
+        link_tag = result.find('a', class_='result__a')
+        if not link_tag:
+            continue
+        title = link_tag.get_text(strip=True)
+        href = _normalize_search_result_url(link_tag.get('href'))
+        if title and href:
+            results.append((title, href))
+
+    if not results:
+        print("No results found.")
+        return
+
+    print("Top 10 results:")
+    for i, (title, link) in enumerate(results[:10], 1):
+        print(f"{i}. {title}\n   {link}")
+
+    while True:
+        choice = input("\nEnter number to fetch (0 to exit): ").strip()
+        if choice == '0':
+            break
+        try:
+            idx = int(choice) - 1
+        except ValueError:
+            print("Invalid input.")
+            continue
+
+        if not (0 <= idx < len(results[:10])):
+            print("Invalid number.")
+            continue
+
+        selected_url = results[idx][1]
+        print(f"\nFetching {selected_url}...")
+        try:
+            status, headers, body = request(selected_url)
+        except (ValueError, OSError) as err:
+            print(f"Request failed: {err}")
+            continue
+
+        if 200 <= status < 300:
+            pretty_print_response(headers, body)
+        else:
+            print(f"Error: HTTP {status}")
+        break
+
 if __name__ == "__main__":
     args = parse_args()
     if args.url:
@@ -250,3 +328,4 @@ if __name__ == "__main__":
     
     elif args.search:
         print(f"Searching for term: {args.search}")
+        search_and_select(args.search)
