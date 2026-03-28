@@ -3,6 +3,26 @@ import sys
 import urllib.parse
 import socket
 import ssl
+import time
+from bs4 import BeautifulSoup
+import json
+
+
+class HTTPClient:
+    _cache = {}
+
+    def _cache_get(self, url):
+        if url in self._cache:
+            body, headers, ts = self._cache[url]
+            if time.time() - ts < 300:
+                return body, headers
+        return None
+
+    def _cache_set(self, url, body, headers):
+        self._cache[url] = (body, headers, time.time())
+
+
+client = HTTPClient()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="HTTP client with search", add_help=False)
@@ -126,38 +146,107 @@ def _read_chunked_body(sock, initial_data):
 
     return data
 
+def request(url, method='GET', headers=None):
+    if headers is None:
+        headers = {}
+
+    # Content‑negotiation: просим JSON и HTML
+    if 'Accept' not in headers:
+        headers['Accept'] = 'text/html,application/json,text/plain;q=0.9,*/*;q=0.8'
+
+    
+    if method == 'GET':
+        cached = client._cache_get(url)
+        if cached:
+            return 200, cached[1], cached[0]  
+
+    redirects = 0
+    current_url = url
+    while redirects < 5:
+        scheme, host, port, path = _parse_url(current_url)
+        sock = _connect(host, port, scheme)
+        req_headers = {
+            'Host': host,
+            'User-Agent': 'go2web/1.0',
+            'Connection': 'close',
+            **headers
+        }
+
+        _send_request(sock, method, path, req_headers)
+        status, resp_headers, body = _read_response(sock)
+        sock.close()
+
+        if status in (301, 302, 303, 307, 308):
+            location = resp_headers.get('location')
+            if location:
+                current_url = urllib.parse.urljoin(current_url, location)
+                redirects += 1
+                if method == 'POST' and status == 303:
+                    method = 'GET'
+                continue
+        break
+
+    if method == 'GET' and 200 <= status < 300:
+        client._cache_set(current_url, body, resp_headers)
+
+    return status, resp_headers, body
+
+def pretty_print_response(headers, body):
+    content_type = headers.get('content-type', '').lower()
+    if 'application/json' in content_type:
+        try:
+            obj = json.loads(body.decode())
+            print(json.dumps(obj, indent=2, ensure_ascii=False))
+        except:
+            print(body.decode())
+    elif 'text/html' in content_type:
+        soup = BeautifulSoup(body, 'html.parser')
+        # remove scripts and styles
+        for script in soup(["script", "style"]):
+            script.decompose()
+        text = soup.get_text()
+        # remove empty lines
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        text = '\n'.join(chunk for chunk in chunks if chunk)
+        print(text)
+    else:
+        print(body.decode())
 
 if __name__ == "__main__":
     args = parse_args()
     if args.url:
         try:
-            scheme, host, port, path = _parse_url(args.url)
-            conn = _connect(host, port, scheme)
-            headers = {
-                'Host': host,
-                'User-Agent': 'go2web/1.0',
-                'Accept': '*/*',
-                'Connection': 'close',
-            }
-            _send_request(conn, 'GET', path, headers)
-            status_code, response_headers, body = _read_response(conn)
-            conn.close()
+            #scheme, host, port, path = _parse_url(args.url) throwed them in to another function
+            #print(f"Connecting to {host}:{port} using {scheme}...")
+            #conn = _connect(host, port, scheme)
+            # headers = {
+            #     'Host': host,
+            #     'User-Agent': 'go2web/1.0',
+            #     'Accept': '*/*',
+            #     'Connection': 'close',
+            # }
+            # _send_request(conn, 'GET', path, headers)
+            status_code, response_headers, body = request(args.url)
+            # conn.close()
 
-            print(f"HTTP status: {status_code}")
-            if status_code in [301, 302]:
-                new_url = response_headers.get('location')
-                print(f"Redirecting to: {new_url}")
-            content_type = response_headers.get('content-type', '')
-            if content_type:
-                print(f"Content-Type: {content_type}")
-            print()
+            # print(f"HTTP status: {status_code}")
+            # if status_code in [301, 302]:
+            #     new_url = response_headers.get('location')
+            #     print(f"Redirecting to: {new_url}")
+            
+            # content_type = response_headers.get('content-type', '')
+            # if content_type:
+            #     print(f"Content-Type: {content_type}")
+            # print()
 
-            if 'text' in content_type.lower() or 'json' in content_type.lower() or not content_type:
-                print(body.decode('utf-8', errors='replace'))
-            else:
-                print(f"Binary response ({len(body)} bytes) received.")
+            
+            pretty_print_response(response_headers, body)
+
+            print(f'cache = {client._cache}')  
         except (ValueError, OSError) as err:
             print(f"Request failed: {err}", file=sys.stderr)
             sys.exit(1)
+    
     elif args.search:
         print(f"Searching for term: {args.search}")
